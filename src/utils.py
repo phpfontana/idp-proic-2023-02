@@ -8,12 +8,13 @@ def initialize_tello():
     """
     Initialize Tello object and return it
     """
+
     # Connect to Tello drone
     tello = Tello()
     tello.connect()
 
     # Check battery
-    print(f"Battery: {tello.get_battery()}")
+    print(f"Battery: {tello.get_battery()}%")
 
     # Set speed
     tello.for_back_velocity = 0
@@ -33,6 +34,7 @@ def tello_get_frame(tello, width, height):
     """
     Get frame from tello drone
     """
+
     # Get frame
     frame = tello.get_frame_read().frame
 
@@ -45,109 +47,79 @@ def tello_get_frame(tello, width, height):
     return frame
 
 
-def initialize_model(weights):
+def detect_object(model, frame, conf):
     """
-    Initialize YOLO model and return it
-    """
-    # Initialize YOLO model
-    model = YOLO(weights)
-
-    return model
-
-
-def find_object(model, img):
-    """
-    find object in frame
+    Detect object in frame
     """
 
-    # Detect objects in the input frame
-    results = model(img)
+    # Detect object
+    results = model.track(frame)
 
-    # Store object center and area
+    # List to store object center and area
     center_list = []
     area_list = []
 
-    # Loop over the detected objects
+    # Loop through results
     for r in results:
         boxes = r.boxes.cpu().numpy()
         names = r.names
 
-        for box in boxes:
-            # Get bounding box coordinates, confidence score and class id
-            x1, y1, x2, y2 = box.xyxy[0].astype(int)
-            conf = box.conf[0].astype(float) * 100
-            class_id = box.cls[0].astype(int)
+        if boxes.id is None:
+            print("No object detected")
+            return frame, [[0, 0], 0]
+        else:
+            for box in boxes:
+                # Get bounding box coordinates, confidence score and class id
+                x1, y1, x2, y2 = box.xyxy[0].astype(int)
+                confidence = box.conf[0].astype(float)
+                class_id = box.cls[0].astype(int)
+                track_id = box.id[0].astype(int)
 
-            # Check if confidence is greater than 50% and class id is 0 (person)
-            if conf > 50 and class_id == 0:
-                # Draw bounding box
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                # check if confidence is greater than conf
+                if confidence > conf:
+                    # Draw bounding box
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (128, 0, 128), 2)
 
-                # Calculate object center
-                center_x = x1 + ((x2 - x1) // 2)
-                center_y = y1 + ((y2 - y1) // 2)
+                    # Overlay mask on frame
+                    overlay = frame.copy()
+                    alpha = 0.8
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), (128, 0, 128), -1)
+                    frame = cv2.addWeighted(frame, alpha, overlay, 1 - alpha, 0)
 
-                # Calculate object area
-                area = (x2 - x1) * (y2 - y1)
+                    # Draw confidence score and class id
+                    cv2.putText(frame, f"id:{track_id} {names[class_id]} {confidence:.2f}", (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 0, 128), 2)
 
-                # Draw object center
-                cv2.circle(img, (center_x, center_y), 5, (0, 0, 255), -1)
+                    # Get center of bounding box
+                    center_x = x1 + ((x2 - x1) // 2)
+                    center_y = y1 + ((y2 - y1) // 2)
 
-                # Draw confidence score and class name
-                cv2.putText(img, f"{str(names[class_id])} {str(conf.astype(int))}%", (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                    # Draw object center
+                    cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
 
-                # Store object center and area
-                center_list.append([center_x, center_y])
-                area_list.append(area)
+                    # Calculate object area
+                    area = (x2 - x1) * (y2 - y1)
 
-    # Return the image, center, and area of largest detected object
-    if area_list:
-        index = area_list.index(max(area_list))
-        return img, [center_list[index], area_list[index]]
+                    # Store object center and area
+                    center_list.append([center_x, center_y])
+                    area_list.append(area)
 
-    # if no object detected, return zero
-    else:
-        return img, [[0, 0], 0]
+                # Return the image, center, and area of largest detected object
+                if area_list:
+                    index = area_list.index(max(area_list))
+                    return frame, [center_list[index], area_list[index]]
+
+                # If no object detected, return zero
+                else:
+                    return frame, [[0, 0], 0]
 
 
-def track_object(tello, info, w, pid, pError, frame):
+def pid_control(error, prev_error, pid):
     """
-    Track object in frame
-    """
+    PID control 
+    """""
 
-    # Calculate error
-    error = int(info[0][0] - w // 2)
+    # Calculate pid
+    speed = pid[0] * error + pid[1] * (error - prev_error)
 
-    # Calculate speed
-    speed = pid[0] * error + pid[1] * (error - pError)
-
-    # Calculate yaw
-    speed = int(np.clip(speed, -100, 100))
-
-    # if object detected
-    if info[0][0] != 0:
-        # set yaw velocity
-        tello.yaw_velocity = speed
-    else:
-        # Stop
-        tello.left_right_velocity = 0
-        tello.for_back_velocity = 0
-        tello.up_down_velocity = 0
-        tello.yaw_velocity = 0
-        error = 0
-
-    # Send RC control to Tello
-    if tello.send_rc_control:
-        tello.send_rc_control(tello.left_right_velocity,
-                              tello.for_back_velocity,
-                              tello.up_down_velocity,
-                              tello.yaw_velocity)
-
-    return error, frame
-
-
-
-
-
-
+    return speed, error
